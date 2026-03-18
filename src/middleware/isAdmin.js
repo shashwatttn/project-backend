@@ -1,8 +1,8 @@
 import db from "../config/db.js";
 
 export const isAdmin = async (req, res, next) => {
-//   console.log("--- isAdmin Middleware Debug ---");
-//   console.log("User:",req.user)
+  //   console.log("--- isAdmin Middleware Debug ---");
+  //   console.log("User:",req.user)
   try {
     const user_id = req.user.user_id;
 
@@ -14,7 +14,7 @@ export const isAdmin = async (req, res, next) => {
     const result = await db.query(query, values);
 
     if (result.rows[0].role !== "admin") {
-        return res.status(403).json({ message: "Unauthorized" });
+      return res.status(403).json({ message: "Unauthorized" });
     }
 
     next();

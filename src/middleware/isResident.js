@@ -1,8 +1,8 @@
 import db from "../config/db.js";
 
 export const isResident = async (req, res, next) => {
-    console.log("--- isResident Middleware Debug ---");
-    console.log("User:",req.user)
+    // console.log("--- isResident Middleware Debug ---");
+    // console.log("User:",req.user)
   try {
     const user_id = req.user.user_id;
 
