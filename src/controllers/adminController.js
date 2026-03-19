@@ -13,7 +13,8 @@ export const getAllFlats = async (req, res) => {
         f.flat_no,
         f.flat_type,
         u.full_name,
-        u.user_id
+        u.user_id,
+        u.email
       FROM flat_subscriptions f
       JOIN users u ON u.user_id = f.user_id
       WHERE f.is_active = true
@@ -36,11 +37,9 @@ export const getSubscriptionPlans = async (req, res) => {
   try {
     const result = await db.query(`
       SELECT 
-        flat_type,
-        MAX(subscription_fees) AS subscription_fees
-      FROM flat_subscriptions
-      GROUP BY flat_type
-      ORDER BY flat_type
+        subscription_fees,
+        flat_type
+      FROM subscriptions
     `);
 
     return res.status(200).json({
@@ -60,7 +59,7 @@ export const updateFlatSubscription = async (req, res) => {
 
   try {
     const query = `
-            UPDATE FLAT_SUBSCRIPTIONS
+            UPDATE subscriptions
             SET subscription_fees = $1
             WHERE flat_type = $2
         `;
@@ -285,18 +284,48 @@ export const sendNotifications = async (req, res) => {
 
 export const updateAdminProfile = async (req, res) => {
   console.log("update admin profile hit");
-  const { user_id, full_name, password } = req.body;
+
+  const user_id = req.user.user_id;
+  const { full_name, password } = req.body;
 
   try {
-    const hashedPassword = await bcrypt.hash(password, 4);
+    if (!full_name && !password) {
+      return res.status(400).json({
+        message: "No fields provided for update",
+      });
+    }
 
-    const query = `UPDATE USERS SET FULL_NAME = $1, PASSWORD = $2 WHERE USER_ID = $3 RETURNING *`;
-    const values = [full_name, hashedPassword, user_id];
+    let queryParts = [];
+    let values = [];
+    let placeholderIndex = 1;
+
+    if (full_name) {
+      queryParts.push(`FULL_NAME = $${placeholderIndex++}`);
+      values.push(full_name);
+    }
+
+    if (password) {
+      const hashedPassword = await bcrypt.hash(password, 4);
+      queryParts.push(`PASSWORD = $${placeholderIndex++}`);
+      values.push(hashedPassword);
+    }
+
+    values.push(user_id);
+    const query = `
+      UPDATE USERS 
+      SET ${queryParts.join(", ")} 
+      WHERE USER_ID = $${placeholderIndex}
+      RETURNING USER_ID, FULL_NAME, EMAIL, ROLE
+    `;
 
     const result = await db.query(query, values);
 
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
     return res.status(200).json({
-      message: "Admin profile updated successfully",
+      message: "Profile updated successfully",
       result: result.rows[0],
     });
   } catch (error) {
@@ -329,6 +358,11 @@ export const deleteFlat = async (req, res) => {
   }
 };
 
+export const getFeesByFlatType = async (res) => {
+  try {
+  } catch (error) {}
+};
+
 // add flat
 export const addFlat = async (req, res) => {
   const { flat_no, full_name, email, flat_type } = req.body;
@@ -341,9 +375,9 @@ export const addFlat = async (req, res) => {
 
   try {
     const query1 = `
-            SELECT USER_ID FROM USERS WHERE EMAIL = $1
+            SELECT USER_ID FROM USERS WHERE EMAIL = $1 AND full_name = $2
         `;
-    const values1 = [email];
+    const values1 = [email, full_name];
 
     const result1 = await db.query(query1, values1);
 
@@ -355,15 +389,22 @@ export const addFlat = async (req, res) => {
 
     const user_id = result1.rows[0].user_id;
 
+    const maxFlatIdQuery = `SELECT MAX(FLAT_ID) FROM FLAT_SUBSCRIPTIONS`;
+
+    const maxFlatIdResult = await db.query(maxFlatIdQuery);
+    let flat_id = maxFlatIdResult.rows[0].max;
+    // console.log("flat_id :", flat_id);
+    flat_id++;
+
     const query2 = `
-            INSERT INTO FLAT_SUBSCRIPTIONS (FLAT_NO,FLAT_TYPE,STATUS,IS_ACTIVE,USER_ID)
-            VALUES ($1,$2,'pending',TRUE,$3) RETURNING FLAT_ID
+            INSERT INTO FLAT_SUBSCRIPTIONS (FLAT_ID,FLAT_NO,FLAT_TYPE,STATUS,IS_ACTIVE,USER_ID)
+            VALUES ($1,$2,$3,'active',TRUE,$4) RETURNING FLAT_ID
         `;
-    const values2 = [flat_no, flat_type, user_id];
+    const values2 = [flat_id, flat_no, flat_type, user_id];
 
     const result2 = await db.query(query2, values2);
 
-    const flat_id = result2.rows[0].flat_id;
+    // const flat_id = result2.rows[0].flat_id;
 
     return res.status(200).json({
       message: "Flat added successfully",
@@ -404,7 +445,7 @@ export const getAdminDashboardStats = async (req, res) => {
         JOIN flat_subscriptions fs
           ON fs.flat_id = mr.flat_id
         WHERE DATE_TRUNC('month', mr.due_date)
-              = DATE_TRUNC('month', CURRENT_DATE)
+              = DATE_TRUNC('month', CURRENT_DATE) AND FS.IS_ACTIVE = TRUE
       `),
 
       db.query(`

@@ -9,7 +9,7 @@ import {
   getResidentNotifications,
   updateProfile,
   payNow,
-  getCurrentMonthDue
+  getCurrentMonthDue,
 } from "../controllers/residentController.js";
 
 const router = express.Router();

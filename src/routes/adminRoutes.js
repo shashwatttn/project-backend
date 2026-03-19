@@ -9,6 +9,7 @@ import {
   getPaymentReports,
   updateAdminProfile,
   getSubscriptionPlans,
+  addFlat
 } from "../controllers/adminController.js";
 import { authenticate } from "../middleware/middleware.js";
 import { isAdmin } from "../middleware/isAdmin.js";
@@ -32,5 +33,7 @@ router.get("/reports", authenticate, isAdmin, getPaymentReports);
 router.get("/subscription-plans", authenticate, isAdmin, getSubscriptionPlans);
 
 router.patch("/update-profile", authenticate, isAdmin, updateAdminProfile);
+
+router.post("/add-flat", authenticate, isAdmin, addFlat);
 
 export default router;

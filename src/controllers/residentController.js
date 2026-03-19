@@ -169,21 +169,46 @@ export const getCurrentMonthDue = async (req, res) => {
   try {
     const user_id = req.user.user_id;
 
+    // find flat + flat_type
     const flatRes = await db.query(
       `
-      SELECT flat_id, flat_no, subscription_fees
+      SELECT flat_id, flat_no, flat_type
       FROM flat_subscriptions
       WHERE user_id = $1
-    `,
-      [user_id],
+      AND is_active = true
+      LIMIT 1
+      `,
+      [user_id]
     );
 
     if (!flatRes.rows.length) {
-      return res.status(404).json({ message: "Flat not found" });
+      return res.status(404).json({
+        message: "Flat not assigned",
+      });
     }
 
-    const flat = flatRes.rows[0];
+    const { flat_id, flat_no, flat_type } = flatRes.rows[0];
 
+    // get subscription amount from subscriptions table
+    const subRes = await db.query(
+      `
+      SELECT subscription_fees
+      FROM subscriptions
+      WHERE flat_type = $1
+      LIMIT 1
+      `,
+      [flat_type]
+    );
+
+    if (!subRes.rows.length) {
+      return res.status(400).json({
+        message: "Subscription plan not configured",
+      });
+    }
+
+    const amount = subRes.rows[0].subscription_fees;
+
+    // find current month billing record
     const recordRes = await db.query(
       `
       SELECT status, due_date
@@ -192,22 +217,25 @@ export const getCurrentMonthDue = async (req, res) => {
       AND DATE_TRUNC('month', due_date)
           = DATE_TRUNC('month', CURRENT_DATE)
       LIMIT 1
-    `,
-      [flat.flat_id],
+      `,
+      [flat_id]
     );
 
     let isPaid = false;
+    let dueDate = null;
 
     if (recordRes.rows.length) {
       isPaid = recordRes.rows[0].status === "PAID";
+      dueDate = recordRes.rows[0].due_date;
     }
 
     return res.json({
       isPaid,
-      amount: flat.subscription_fees,
-      flat_no: flat.flat_no,
-      due_date: recordRes.rows[0]?.due_date,
+      amount,
+      flat_no,
+      due_date: dueDate,
     });
+
   } catch (err) {
     console.log(err);
     res.status(500).json({
@@ -228,14 +256,16 @@ export const payNow = async (req, res) => {
 
     await client.query("BEGIN");
 
-    // 1️ find flat
+    // 1️⃣ find flat + flat_type
     const flatRes = await client.query(
       `
-      SELECT flat_id, subscription_fees
+      SELECT flat_id, flat_type
       FROM flat_subscriptions
       WHERE user_id = $1
-    `,
-      [user_id],
+      AND is_active = true
+      LIMIT 1
+      `,
+      [user_id]
     );
 
     if (!flatRes.rows.length) {
@@ -243,9 +273,29 @@ export const payNow = async (req, res) => {
       return res.status(404).json({ message: "Flat not found" });
     }
 
-    const { flat_id, subscription_fees } = flatRes.rows[0];
+    const { flat_id, flat_type } = flatRes.rows[0];
 
-    // 2️ find current month record
+    // 2️⃣ get subscription amount
+    const subRes = await client.query(
+      `
+      SELECT subscription_fees
+      FROM subscriptions
+      WHERE flat_type = $1
+      LIMIT 1
+      `,
+      [flat_type]
+    );
+
+    if (!subRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        message: "Subscription plan not configured",
+      });
+    }
+
+    const amount = subRes.rows[0].subscription_fees;
+
+    // 3️⃣ find current billing record
     const recordRes = await client.query(
       `
       SELECT monthly_record_id, status
@@ -254,8 +304,8 @@ export const payNow = async (req, res) => {
       AND DATE_TRUNC('month', due_date)
           = DATE_TRUNC('month', CURRENT_DATE)
       LIMIT 1
-    `,
-      [flat_id],
+      `,
+      [flat_id]
     );
 
     if (!recordRes.rows.length) {
@@ -267,7 +317,7 @@ export const payNow = async (req, res) => {
 
     const record = recordRes.rows[0];
 
-    // 3️ check already paid (monthly_record OR payments)
+    // 4️⃣ prevent duplicate payment
     const paymentCheck = await client.query(
       `
       SELECT 1
@@ -276,8 +326,8 @@ export const payNow = async (req, res) => {
       AND DATE_TRUNC('month', payment_date)
           = DATE_TRUNC('month', CURRENT_DATE)
       LIMIT 1
-    `,
-      [user_id],
+      `,
+      [user_id]
     );
 
     if (record.status === "PAID" || paymentCheck.rows.length) {
@@ -287,25 +337,25 @@ export const payNow = async (req, res) => {
       });
     }
 
-    // 4 insert payment
+    // 5️⃣ insert payment
     const payment = await client.query(
       `
       INSERT INTO payments
       (user_id, amount_paid, mode_of_payment, payment_date)
       VALUES ($1,$2,'ONLINE',CURRENT_DATE)
       RETURNING *
-    `,
-      [user_id, subscription_fees],
+      `,
+      [user_id, amount]
     );
 
-    // 5️ update monthly_record
+    // 6️⃣ update billing record
     await client.query(
       `
       UPDATE monthly_records
       SET status = 'PAID'
       WHERE monthly_record_id = $1
-    `,
-      [record.monthly_record_id],
+      `,
+      [record.monthly_record_id]
     );
 
     await client.query("COMMIT");
@@ -314,6 +364,7 @@ export const payNow = async (req, res) => {
       message: "Payment successful",
       payment: payment.rows[0],
     });
+
   } catch (err) {
     await client.query("ROLLBACK");
     console.log(err);
