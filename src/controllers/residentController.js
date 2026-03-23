@@ -163,19 +163,24 @@ export const updateProfile = async (req, res) => {
   }
 };
 
-// get : current payment due
+// get : current payment due // done
 
 export const getCurrentMonthDue = async (req, res) => {
   try {
     const user_id = req.user.user_id;
 
-    // find flat + flat_type
+    // find flat + subscription plan in one query
     const flatRes = await db.query(
       `
-      SELECT flat_id, flat_no, flat_type
-      FROM flat_subscriptions
-      WHERE user_id = $1
-      AND is_active = true
+      SELECT 
+        f.flat_id,
+        f.flat_no,
+        s.subscription_fees
+      FROM flat_subscriptions f
+      JOIN subscriptions s
+        ON s.subscription_id = f.subscription_id
+      WHERE f.user_id = $1
+      AND f.is_active = true
       LIMIT 1
       `,
       [user_id]
@@ -187,35 +192,16 @@ export const getCurrentMonthDue = async (req, res) => {
       });
     }
 
-    const { flat_id, flat_no, flat_type } = flatRes.rows[0];
+    const { flat_id, flat_no, subscription_fees } = flatRes.rows[0];
 
-    // get subscription amount from subscriptions table
-    const subRes = await db.query(
-      `
-      SELECT subscription_fees
-      FROM subscriptions
-      WHERE flat_type = $1
-      LIMIT 1
-      `,
-      [flat_type]
-    );
-
-    if (!subRes.rows.length) {
-      return res.status(400).json({
-        message: "Subscription plan not configured",
-      });
-    }
-
-    const amount = subRes.rows[0].subscription_fees;
-
-    // find current month billing record
+    // get current month billing record
     const recordRes = await db.query(
       `
       SELECT status, due_date
       FROM monthly_records
       WHERE flat_id = $1
       AND DATE_TRUNC('month', due_date)
-          = DATE_TRUNC('month', CURRENT_DATE)
+            = DATE_TRUNC('month', CURRENT_DATE)
       LIMIT 1
       `,
       [flat_id]
@@ -231,7 +217,7 @@ export const getCurrentMonthDue = async (req, res) => {
 
     return res.json({
       isPaid,
-      amount,
+      amount: subscription_fees,
       flat_no,
       due_date: dueDate,
     });
@@ -244,7 +230,7 @@ export const getCurrentMonthDue = async (req, res) => {
   }
 };
 
-// post : payment
+// post : payment 
 
 export const payNow = async (req, res) => {
   console.log("pay-now by resident hit");
@@ -256,7 +242,7 @@ export const payNow = async (req, res) => {
 
     await client.query("BEGIN");
 
-    // 1️⃣ find flat + flat_type
+    //  find flat + flat_type
     const flatRes = await client.query(
       `
       SELECT flat_id, flat_type
@@ -275,7 +261,7 @@ export const payNow = async (req, res) => {
 
     const { flat_id, flat_type } = flatRes.rows[0];
 
-    // 2️⃣ get subscription amount
+    //  get subscription amount
     const subRes = await client.query(
       `
       SELECT subscription_fees
@@ -295,7 +281,7 @@ export const payNow = async (req, res) => {
 
     const amount = subRes.rows[0].subscription_fees;
 
-    // 3️⃣ find current billing record
+    //  find current billing record
     const recordRes = await client.query(
       `
       SELECT monthly_record_id, status
@@ -317,7 +303,7 @@ export const payNow = async (req, res) => {
 
     const record = recordRes.rows[0];
 
-    // 4️⃣ prevent duplicate payment
+    //  prevent duplicate payment
     const paymentCheck = await client.query(
       `
       SELECT 1
@@ -337,7 +323,7 @@ export const payNow = async (req, res) => {
       });
     }
 
-    // 5️⃣ insert payment
+    //  insert payment
     const payment = await client.query(
       `
       INSERT INTO payments
@@ -348,7 +334,7 @@ export const payNow = async (req, res) => {
       [user_id, amount]
     );
 
-    // 6️⃣ update billing record
+    //  update billing record
     await client.query(
       `
       UPDATE monthly_records

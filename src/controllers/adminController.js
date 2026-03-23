@@ -5,34 +5,39 @@ import bcrypt from "bcrypt";
 
 // get // done
 export const getAllFlats = async (req, res) => {
-  // console.log("flat api hit");
   try {
     const query = `
       SELECT 
         f.flat_id,
         f.flat_no,
-        f.flat_type,
+        s.flat_type,
+        s.subscription_fees,
         u.full_name,
         u.user_id,
         u.email
       FROM flat_subscriptions f
-      JOIN users u ON u.user_id = f.user_id
+      JOIN subscriptions s 
+        ON s.subscription_id = f.subscription_id
+      LEFT JOIN users u 
+        ON u.user_id = f.user_id
       WHERE f.is_active = true
       ORDER BY f.flat_no
     `;
 
     const result = await db.query(query);
-    // console.log("flats :", result);
+
     return res.status(200).json({
       data: result.rows,
     });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ message: "Failed to fetch flats" });
+    res.status(500).json({
+      message: "Failed to fetch flats",
+    });
   }
 };
 
-// get
+// get // done
 export const getSubscriptionPlans = async (req, res) => {
   try {
     const result = await db.query(`
@@ -53,7 +58,7 @@ export const getSubscriptionPlans = async (req, res) => {
   }
 };
 
-// patch
+// patch // done
 export const updateFlatSubscription = async (req, res) => {
   const { flat_type, subscription_fees } = req.body;
 
@@ -77,133 +82,236 @@ export const updateFlatSubscription = async (req, res) => {
   }
 };
 
-// put
-export const updateFlatProperties = async (req, res) => {
-  const { flat_id, flat_no, user_name, email, flat_type } = req.body;
+// get : getFlatById // done
 
+export const getFlatById = async (req, res) => {
   try {
-    const query1 = `
-            UPDATE flat_subscriptions
-            SET flat_no = $1,
-                flat_type = $2
-            WHERE flat_id = $3
-        `;
-    const values1 = [flat_no, flat_type, flat_id];
+    const { flat_id } = req.params;
 
-    await db.query(query1, values1);
+    const query = `
+      SELECT 
+        f.flat_id,
+        f.flat_no,
+        f.subscription_id,
+        s.flat_type,
+        s.subscription_fees,
+        u.full_name,
+        u.user_id,
+        u.email
+      FROM flat_subscriptions f
+      JOIN subscriptions s 
+        ON s.subscription_id = f.subscription_id
+      LEFT JOIN users u 
+        ON u.user_id = f.user_id
+      WHERE f.flat_id = $1
+    `;
 
-    const query2 = `
-            UPDATE USERS
-            SET FULL_NAME = $1,
-                EMAIL = $2
-            WHERE USER_ID = (SELECT USER_ID FROM FLAT_SUBSCRIPTIONS WHERE FLAT_ID = $3)
-        `;
-    const values2 = [user_name, email, flat_id];
-    await db.query(query2, values2);
+    const result = await db.query(query, [flat_id]);
+
+    if (!result.rows.length) {
+      return res.status(404).json({
+        message: "Flat not found",
+      });
+    }
+
     return res.status(200).json({
-      message: "Flat properties updated successfully",
+      data: result.rows[0],
     });
   } catch (error) {
-    console.error("Error updating flat properties:", error);
-    return res.status(500).json({ error: "Internal server error" });
+    console.error(error);
+    res.status(500).json({
+      message: "Failed to fetch flat",
+    });
+  }
+};
+
+// put // done
+export const updateFlat = async (req, res) => {
+  console.log("Update Flat Hit");
+  const { flat_id, flat_no, subscription_id, full_name, email } = req.body;
+
+  if (!flat_id || !flat_no || !subscription_id) {
+    return res.status(400).json({
+      message: "Missing required fields",
+    });
+  }
+
+  const client = await db.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    // check flat exists
+    const flatCheck = await client.query(
+      `SELECT user_id FROM flat_subscriptions WHERE flat_id = $1`,
+      [flat_id],
+    );
+
+    if (!flatCheck.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({
+        message: "Flat not found",
+      });
+    }
+
+    const user_id = flatCheck.rows[0].user_id;
+
+    // update flat
+    await client.query(
+      `
+      UPDATE flat_subscriptions
+      SET flat_no = $1,
+          subscription_id = $2
+      WHERE flat_id = $3
+    `,
+      [flat_no, subscription_id, flat_id],
+    );
+
+    // update user only if resident exists
+    if (user_id && full_name && email) {
+      await client.query(
+        `
+        UPDATE users
+        SET full_name = $1,
+            email = $2
+        WHERE user_id = $3
+      `,
+        [full_name, email, user_id],
+      );
+    }
+
+    await client.query("COMMIT");
+
+    return res.json({
+      message: "Flat updated successfully",
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.log(err);
+
+    res.status(500).json({
+      message: "Update failed",
+    });
+  } finally {
+    client.release();
   }
 };
 
 // post  : add payment
 
 export const addPayment = async (req, res) => {
+  // console.log("Add Payment hit");
+
+  const { flat_no, amount_paid, mode_of_payment, month } = req.body;
+
+  if (!flat_no || !amount_paid || !mode_of_payment || !month) {
+    return res.status(400).json({
+      message: "Missing required fields",
+    });
+  }
+
+  const client = await db.connect();
+
   try {
-    const { flat_id, amount_paid, mode_of_payment, payment_date } = req.body;
+    await client.query("BEGIN");
 
-    if (!flat_id || !amount_paid || !mode_of_payment) {
-      return res.status(400).json({ message: "Missing required fields" });
-    }
-
-    // Find user living in this flat
-    const flatResult = await db.query(
-      `SELECT user_id FROM flat_subscriptions WHERE flat_id = $1`,
-      [flat_id],
+    // Get flat + resident
+    const flatRes = await client.query(
+      `
+      SELECT flat_id, user_id
+      FROM flat_subscriptions
+      WHERE flat_no = $1
+      AND is_active = true
+      `,
+      [flat_no]
     );
 
-    if (flatResult.rows.length === 0) {
-      return res.status(404).json({ message: "Flat not found" });
+    if (!flatRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({
+        message: "Flat not found",
+      });
     }
 
-    const user_id = flatResult.rows[0].user_id;
+    const { flat_id, user_id } = flatRes.rows[0];
 
     if (!user_id) {
+      await client.query("ROLLBACK");
       return res.status(400).json({
         message: "No resident assigned to this flat",
       });
     }
 
-    // Insert Payment
-    const paymentInsert = await db.query(
-      `INSERT INTO payments (user_id, amount_paid, mode_of_payment, payment_date)
-       VALUES ($1,$2,$3,$4)
-       RETURNING *`,
-      [user_id, amount_paid, mode_of_payment, payment_date || new Date()],
-    );
-
-    // Get latest pending monthly record
-    const recordResult = await db.query(
+    // Get monthly billing record
+    const recordRes = await client.query(
       `
-        SELECT monthly_record_id
-        FROM monthly_records
-        WHERE flat_id = $1
-        AND DATE_TRUNC('month', due_date)
-              = DATE_TRUNC('month', CURRENT_DATE)
-        LIMIT 1
-`,
-      [flat_id],
+      SELECT monthly_record_id, status
+      FROM monthly_records
+      WHERE flat_id = $1
+      AND EXTRACT(MONTH FROM due_date) = $2
+      AND EXTRACT(YEAR FROM due_date) = EXTRACT(YEAR FROM CURRENT_DATE)
+      LIMIT 1
+      `,
+      [flat_id, month]
     );
 
-    if (recordResult.rows.length > 0) {
-      const record_id = recordResult.rows[0].monthly_record_id;
-
-      await db.query(
-        `UPDATE monthly_records
-         SET status = 'PAID'
-         WHERE monthly_record_id = $1`,
-        [record_id],
-      );
+    if (!recordRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        message: "Monthly record not found",
+      });
     }
 
-    return res.status(201).json({
-      message: "Payment added successfully",
-      payment: paymentInsert.rows[0],
+    const record = recordRes.rows[0];
+
+    if (record.status === "PAID") {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        message: "Already paid for this month",
+      });
+    }
+
+    // Insert payment
+    const payment = await client.query(
+      `
+      INSERT INTO payments
+      (user_id, amount_paid, mode_of_payment, payment_date)
+      VALUES ($1,$2,$3,CURRENT_DATE)
+      RETURNING *
+      `,
+      [user_id, amount_paid, mode_of_payment]
+    );
+
+    // Update billing status
+    await client.query(
+      `
+      UPDATE monthly_records
+      SET status = 'PAID'
+      WHERE monthly_record_id = $1
+      `,
+      [record.monthly_record_id]
+    );
+
+    await client.query("COMMIT");
+
+    return res.json({
+      message: "Payment recorded successfully",
+      payment: payment.rows[0],
     });
+
   } catch (err) {
+    await client.query("ROLLBACK");
     console.log(err);
-    return res.status(500).json({
-      message: "Server error",
+
+    res.status(500).json({
+      message: "Payment failed",
     });
+  } finally {
+    client.release();
   }
 };
 
-// get   : monthly-records
-
-export const getMonthlyRecords = async (req, res) => {
-  try {
-    const query = `
-            SELECT 
-                * from monthly_records
-        `;
-
-    const result = await db.query(query);
-
-    console.log("monthly records", result.rows);
-
-    return res.status(200).json({
-      message: "Monthly records retrieved successfully",
-      result: result.rows,
-    });
-  } catch (error) {
-    console.error("Error getting monthly records:", error);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-};
-
+// get // done
 export const getPreviousPayments = async (req, res) => {
   try {
     const query = `
@@ -231,7 +339,8 @@ export const getPreviousPayments = async (req, res) => {
     return res.status(500).json({ error: "Internal server error" });
   }
 };
-// post  : send-notifications
+
+// post  : send-notifications // done
 
 export const sendNotifications = async (req, res) => {
   try {
@@ -280,7 +389,7 @@ export const sendNotifications = async (req, res) => {
 //   }
 // };
 
-// patch : update profile
+// patch : update profile // done
 
 export const updateAdminProfile = async (req, res) => {
   console.log("update admin profile hit");
@@ -334,7 +443,7 @@ export const updateAdminProfile = async (req, res) => {
   }
 };
 
-// delete : delete flat (soft delete)
+// delete : delete flat (soft delete) // done
 
 export const deleteFlat = async (req, res) => {
   try {
@@ -358,12 +467,7 @@ export const deleteFlat = async (req, res) => {
   }
 };
 
-export const getFeesByFlatType = async (res) => {
-  try {
-  } catch (error) {}
-};
-
-// add flat
+// add flat // done
 export const addFlat = async (req, res) => {
   const { flat_no, full_name, email, flat_type } = req.body;
 
@@ -374,45 +478,65 @@ export const addFlat = async (req, res) => {
   }
 
   try {
-    const query1 = `
-            SELECT USER_ID FROM USERS WHERE EMAIL = $1 AND full_name = $2
-        `;
-    const values1 = [email, full_name];
+    //  find resident
+    const userRes = await db.query(
+      `
+      SELECT user_id 
+      FROM users 
+      WHERE email = $1 
+      AND full_name = $2
+      LIMIT 1
+      `,
+      [email, full_name],
+    );
 
-    const result1 = await db.query(query1, values1);
-
-    if (result1.rows.length === 0) {
+    if (!userRes.rows.length) {
       return res.status(404).json({
         message: "User not found",
       });
     }
 
-    const user_id = result1.rows[0].user_id;
+    const user_id = userRes.rows[0].user_id;
 
-    const maxFlatIdQuery = `SELECT MAX(FLAT_ID) FROM FLAT_SUBSCRIPTIONS`;
+    // find subscription_id using flat_type
+    const subRes = await db.query(
+      `
+      SELECT subscription_id
+      FROM subscriptions
+      WHERE flat_type = $1
+      LIMIT 1
+      `,
+      [flat_type],
+    );
 
-    const maxFlatIdResult = await db.query(maxFlatIdQuery);
-    let flat_id = maxFlatIdResult.rows[0].max;
-    // console.log("flat_id :", flat_id);
-    flat_id++;
+    if (!subRes.rows.length) {
+      return res.status(400).json({
+        message: "Subscription plan not configured",
+      });
+    }
 
-    const query2 = `
-            INSERT INTO FLAT_SUBSCRIPTIONS (FLAT_ID,FLAT_NO,FLAT_TYPE,STATUS,IS_ACTIVE,USER_ID)
-            VALUES ($1,$2,$3,'active',TRUE,$4) RETURNING FLAT_ID
-        `;
-    const values2 = [flat_id, flat_no, flat_type, user_id];
+    const subscription_id = subRes.rows[0].subscription_id;
 
-    const result2 = await db.query(query2, values2);
-
-    // const flat_id = result2.rows[0].flat_id;
+    // insert flat
+    const insertRes = await db.query(
+      `
+      INSERT INTO flat_subscriptions
+      (flat_no, status, is_active, user_id, subscription_id)
+      VALUES ($1,'active',TRUE,$2,$3)
+      RETURNING flat_id
+      `,
+      [flat_no, user_id, subscription_id],
+    );
 
     return res.status(200).json({
       message: "Flat added successfully",
-      result: result2.rows[0],
+      result: insertRes.rows[0],
     });
   } catch (error) {
     console.error("Error adding flat:", error);
-    return res.status(500).json({ error: "Internal server error" });
+    return res.status(500).json({
+      message: "Internal server error",
+    });
   }
 };
 
@@ -427,11 +551,13 @@ export const getAdminDashboardStats = async (req, res) => {
       collectedRevenue,
       pendingFlats,
     ] = await Promise.all([
+      // TOTAL FLATS
       db.query(`
         SELECT COUNT(*)::int AS total
         FROM flat_subscriptions
         `),
 
+      // OCCUPIED FLATS
       db.query(`
         SELECT COUNT(*)::int AS total
         FROM flat_subscriptions
@@ -439,31 +565,43 @@ export const getAdminDashboardStats = async (req, res) => {
         AND user_id IS NOT NULL
       `),
 
+      // EXPECTED REVENUE
       db.query(`
-        SELECT COALESCE(SUM(fs.subscription_fees),0)::int AS revenue
+        SELECT COALESCE(SUM(s.subscription_fees),0)::int AS revenue
         FROM monthly_records mr
         JOIN flat_subscriptions fs
           ON fs.flat_id = mr.flat_id
+        JOIN subscriptions s
+          ON s.subscription_id = fs.subscription_id
         WHERE DATE_TRUNC('month', mr.due_date)
-              = DATE_TRUNC('month', CURRENT_DATE) AND FS.IS_ACTIVE = TRUE
+              = DATE_TRUNC('month', CURRENT_DATE)
+        AND fs.is_active = true
       `),
 
+      // COLLECTED REVENUE
       db.query(`
-        SELECT COALESCE(SUM(fs.subscription_fees),0)::int AS revenue
+        SELECT COALESCE(SUM(s.subscription_fees),0)::int AS revenue
         FROM monthly_records mr
         JOIN flat_subscriptions fs
           ON fs.flat_id = mr.flat_id
+        JOIN subscriptions s
+          ON s.subscription_id = fs.subscription_id
         WHERE mr.status = 'PAID'
         AND DATE_TRUNC('month', mr.due_date)
               = DATE_TRUNC('month', CURRENT_DATE)
+        AND fs.is_active = true
       `),
 
+      // PENDING FLATS
       db.query(`
-        SELECT COUNT(DISTINCT flat_id)::int AS total
-        FROM monthly_records
-        WHERE status = 'PENDING'
-        AND DATE_TRUNC('month', due_date)
+        SELECT COUNT(DISTINCT mr.flat_id)::int AS total
+        FROM monthly_records mr
+        JOIN flat_subscriptions fs
+          ON fs.flat_id = mr.flat_id
+        WHERE mr.status = 'PENDING'
+        AND DATE_TRUNC('month', mr.due_date)
               = DATE_TRUNC('month', CURRENT_DATE)
+        AND fs.is_active = true
       `),
     ]);
 
@@ -476,7 +614,9 @@ export const getAdminDashboardStats = async (req, res) => {
     });
   } catch (err) {
     console.log(err);
-    res.status(500).json({ message: "Server error" });
+    res.status(500).json({
+      message: "Server error",
+    });
   }
 };
 
